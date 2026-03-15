@@ -60,6 +60,38 @@ def _legal_moves(matrix: List[List[int]]) -> List[Move]:
 	return moves
 
 
+def _pruned_expansion_moves(matrix: List[List[int]]) -> List[Move]:
+	n = len(matrix)
+	occupied: List[Move] = []
+	legal: List[Move] = []
+	for r in range(n):
+		for c in range(n):
+			if matrix[r][c] == 0:
+				legal.append((r, c))
+			else:
+				occupied.append((r, c))
+
+	if not legal:
+		return []
+	if not occupied:
+		return legal
+
+	candidates: Set[Move] = set()
+	for r, c in occupied:
+		for n1r, n1c in _neighbors_even_r(r, c, n):
+			if matrix[n1r][n1c] == 0:
+				candidates.add((n1r, n1c))
+			for n2r, n2c in _neighbors_even_r(n1r, n1c, n):
+				if matrix[n2r][n2c] == 0:
+					candidates.add((n2r, n2c))
+
+	if not candidates:
+		return legal
+
+	# Keep row-major order for reproducible behavior.
+	return [move for move in legal if move in candidates]
+
+
 def _frontier_moves(matrix: List[List[int]], legal: List[Move]) -> List[Move]:
 	if not legal:
 		return []
@@ -316,7 +348,7 @@ class _Node:
 
 	def __post_init__(self) -> None:
 		if not self.untried_moves and _winner(self.matrix) == 0:
-			self.untried_moves = _legal_moves(self.matrix)
+			self.untried_moves = _pruned_expansion_moves(self.matrix)
 
 class SmartPlayer(Player):
 	def __init__(self, player_id: int):
