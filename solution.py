@@ -34,6 +34,19 @@ def _legal_moves(matrix: List[List[int]]) -> List[Move]:
 	return moves
 
 
+def _frontier_moves(matrix: List[List[int]], legal: List[Move]) -> List[Move]:
+	if not legal:
+		return []
+	n = len(matrix)
+	frontier: List[Move] = []
+	for r, c in legal:
+		for nr, nc in _neighbors_even_r(r, c, n):
+			if matrix[nr][nc] != 0:
+				frontier.append((r, c))
+				break
+	return frontier
+
+
 def _neighbors_even_r(r: int, c: int, n: int):
 	if r % 2 == 0:
 		deltas = [(-1, -1), (-1, 0), (0, -1), (0, 1), (1, -1), (1, 0)]
@@ -98,6 +111,30 @@ def _play_move(matrix: List[List[int]], move: Move, player_id: int) -> List[List
 	new_matrix = [row[:] for row in matrix]
 	new_matrix[r][c] = player_id
 	return new_matrix
+
+
+def _is_threatened_bridge_fill(
+	matrix: List[List[int]],
+	move: Move,
+	player_id: int,
+	enemy_id: int,
+) -> bool:
+	r, c = move
+	n = len(matrix)
+	neighbors_move = list(_neighbors_even_r(r, c, n))
+	neighbors_move_set = set(neighbors_move)
+
+	for er, ec in neighbors_move:
+		if matrix[er][ec] != enemy_id:
+			continue
+		common = neighbors_move_set.intersection(set(_neighbors_even_r(er, ec, n)))
+		own_endpoints = 0
+		for pr, pc in common:
+			if matrix[pr][pc] == player_id:
+				own_endpoints += 1
+				if own_endpoints >= 2:
+					return True
+	return False
 
 
 @dataclass
@@ -211,7 +248,52 @@ class SmartPlayer(Player):
 			if not legal:
 				return 0.0
 
-			move = legal[random.randrange(len(legal))]
+			frontier = _frontier_moves(sim, legal)
+			candidates = frontier if frontier else legal
+
+			# Priority 1: if current player has a winning move now, play it.
+			move = None
+			for candidate in candidates:
+				test = _play_move(sim, candidate, player)
+				if _winner(test) == player:
+					move = candidate
+					break
+			if move is None and candidates is not legal:
+				for candidate in legal:
+					test = _play_move(sim, candidate, player)
+					if _winner(test) == player:
+						move = candidate
+						break
+
+			# Priority 2: block opponent immediate winning move.
+			enemy = 2 if player == 1 else 1
+			if move is None:
+				for candidate in candidates:
+					test = _play_move(sim, candidate, enemy)
+					if _winner(test) == enemy:
+						move = candidate
+						break
+			if move is None and candidates is not legal:
+				for candidate in legal:
+					test = _play_move(sim, candidate, enemy)
+					if _winner(test) == enemy:
+						move = candidate
+						break
+
+			# Priority 3: fill threatened bridge.
+			if move is None:
+				bridge_moves = [
+					candidate
+					for candidate in candidates
+					if _is_threatened_bridge_fill(sim, candidate, player, enemy)
+				]
+				if bridge_moves:
+					move = bridge_moves[random.randrange(len(bridge_moves))]
+
+			# Priority 4: random move restricted to local frontier.
+			if move is None:
+				move = candidates[random.randrange(len(candidates))]
+
 			r, c = move
 			sim[r][c] = player
 			player = 2 if player == 1 else 1
