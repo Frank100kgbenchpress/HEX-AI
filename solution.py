@@ -5,10 +5,36 @@ from dataclasses import dataclass, field
 import math
 import random
 import time
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 
 Move = Tuple[int, int]
+
+
+class _DSU:
+	def __init__(self, size: int):
+		self.parent = list(range(size))
+		self.rank = [0] * size
+
+	def find(self, x: int) -> int:
+		while self.parent[x] != x:
+			self.parent[x] = self.parent[self.parent[x]]
+			x = self.parent[x]
+		return x
+
+	def union(self, a: int, b: int) -> None:
+		ra = self.find(a)
+		rb = self.find(b)
+		if ra == rb:
+			return
+		if self.rank[ra] < self.rank[rb]:
+			ra, rb = rb, ra
+		self.parent[rb] = ra
+		if self.rank[ra] == self.rank[rb]:
+			self.rank[ra] += 1
+
+	def connected(self, a: int, b: int) -> bool:
+		return self.find(a) == self.find(b)
 
 
 def _copy_matrix(board: HexBoard) -> List[List[int]]:
@@ -56,6 +82,144 @@ def _neighbors_even_r(r: int, c: int, n: int):
 		nr, nc = r + dr, c + dc
 		if 0 <= nr < n and 0 <= nc < n:
 			yield nr, nc
+
+
+def _cell_index(r: int, c: int, n: int) -> int:
+	return r * n + c
+
+
+def _build_rollout_union_finds(
+	matrix: List[List[int]],
+) -> Tuple[_DSU, _DSU, int, int, int, int]:
+	n = len(matrix)
+	base = n * n
+	left = base
+	right = base + 1
+	top = base
+	bottom = base + 1
+
+	uf_p1 = _DSU(base + 2)
+	uf_p2 = _DSU(base + 2)
+
+	for r in range(n):
+		for c in range(n):
+			owner = matrix[r][c]
+			if owner == 0:
+				continue
+			idx = _cell_index(r, c, n)
+
+			if owner == 1:
+				if c == 0:
+					uf_p1.union(idx, left)
+				if c == n - 1:
+					uf_p1.union(idx, right)
+				for nr, nc in _neighbors_even_r(r, c, n):
+					if matrix[nr][nc] == 1:
+						uf_p1.union(idx, _cell_index(nr, nc, n))
+			else:
+				if r == 0:
+					uf_p2.union(idx, top)
+				if r == n - 1:
+					uf_p2.union(idx, bottom)
+				for nr, nc in _neighbors_even_r(r, c, n):
+					if matrix[nr][nc] == 2:
+						uf_p2.union(idx, _cell_index(nr, nc, n))
+
+	return uf_p1, uf_p2, left, right, top, bottom
+
+
+def _rollout_winner_dsu(
+	uf_p1: _DSU,
+	uf_p2: _DSU,
+	left: int,
+	right: int,
+	top: int,
+	bottom: int,
+) -> int:
+	if uf_p1.connected(left, right):
+		return 1
+	if uf_p2.connected(top, bottom):
+		return 2
+	return 0
+
+
+def _would_win_with_move_dsu(
+	matrix: List[List[int]],
+	move: Move,
+	player_id: int,
+	uf_p1: _DSU,
+	uf_p2: _DSU,
+	left: int,
+	right: int,
+	top: int,
+	bottom: int,
+) -> bool:
+	n = len(matrix)
+	r, c = move
+
+	if player_id == 1:
+		has_left = c == 0
+		has_right = c == n - 1
+		for nr, nc in _neighbors_even_r(r, c, n):
+			if matrix[nr][nc] != 1:
+				continue
+			n_idx = _cell_index(nr, nc, n)
+			if uf_p1.connected(n_idx, left):
+				has_left = True
+			if uf_p1.connected(n_idx, right):
+				has_right = True
+			if has_left and has_right:
+				return True
+		return has_left and has_right
+
+	has_top = r == 0
+	has_bottom = r == n - 1
+	for nr, nc in _neighbors_even_r(r, c, n):
+		if matrix[nr][nc] != 2:
+			continue
+		n_idx = _cell_index(nr, nc, n)
+		if uf_p2.connected(n_idx, top):
+			has_top = True
+		if uf_p2.connected(n_idx, bottom):
+			has_bottom = True
+		if has_top and has_bottom:
+			return True
+	return has_top and has_bottom
+
+
+def _apply_move_to_rollout_dsu(
+	matrix: List[List[int]],
+	move: Move,
+	player_id: int,
+	uf_p1: _DSU,
+	uf_p2: _DSU,
+	left: int,
+	right: int,
+	top: int,
+	bottom: int,
+) -> None:
+	n = len(matrix)
+	r, c = move
+	matrix[r][c] = player_id
+	idx = _cell_index(r, c, n)
+
+	if player_id == 1:
+		if c == 0:
+			uf_p1.union(idx, left)
+		if c == n - 1:
+			uf_p1.union(idx, right)
+		for nr, nc in _neighbors_even_r(r, c, n):
+			if matrix[nr][nc] == 1:
+				uf_p1.union(idx, _cell_index(nr, nc, n))
+		return
+
+	if r == 0:
+		uf_p2.union(idx, top)
+	if r == n - 1:
+		uf_p2.union(idx, bottom)
+	for nr, nc in _neighbors_even_r(r, c, n):
+		if matrix[nr][nc] == 2:
+			uf_p2.union(idx, _cell_index(nr, nc, n))
 
 
 def _has_won(matrix: List[List[int]], player_id: int) -> bool:
@@ -147,27 +311,19 @@ class _Node:
 	value_sum: float = 0.0
 	children: List["_Node"] = field(default_factory=list)
 	untried_moves: List[Move] = field(default_factory=list)
+	rave_visits: Dict[Move, int] = field(default_factory=dict)
+	rave_value_sum: Dict[Move, float] = field(default_factory=dict)
 
 	def __post_init__(self) -> None:
 		if not self.untried_moves and _winner(self.matrix) == 0:
 			self.untried_moves = _legal_moves(self.matrix)
-
-	def uct(self, exploration: float) -> float:
-		if self.visits == 0:
-			return float("inf")
-		assert self.parent is not None
-		exploitation = self.value_sum / self.visits
-		exploration_term = exploration * math.sqrt(
-			math.log(max(1, self.parent.visits)) / self.visits
-		)
-		return exploitation + exploration_term
-
 
 class SmartPlayer(Player):
 	def __init__(self, player_id: int):
 		super().__init__(player_id)
 		self.enemy_id = 2 if player_id == 1 else 1
 		self.exploration = 1.2
+		self.rave_equiv = 300.0
 		self.max_rollout_moves = 200
 		self.time_budget_seconds = 1.2
 		self.max_iterations = 5000
@@ -203,13 +359,19 @@ class SmartPlayer(Player):
 				break
 
 			node = root
+			path_nodes: List[_Node] = [root]
+			path_moves: List[Tuple[Move, int]] = []
 
 			while node.untried_moves == [] and node.children:
-				node = self._select_child(node)
+				child = self._select_child(node)
+				path_moves.append((child.move_from_parent, node.to_move))
+				node = child
+				path_nodes.append(node)
 
 			if node.untried_moves:
 				move = node.untried_moves.pop(random.randrange(len(node.untried_moves)))
 				next_matrix = _play_move(node.matrix, move, node.to_move)
+				played_by = node.to_move
 				child = _Node(
 					matrix=next_matrix,
 					to_move=2 if node.to_move == 1 else 1,
@@ -217,10 +379,12 @@ class SmartPlayer(Player):
 					move_from_parent=move,
 				)
 				node.children.append(child)
+				path_moves.append((move, played_by))
 				node = child
+				path_nodes.append(node)
 
-			reward = self._rollout(node.matrix, node.to_move, n)
-			self._backpropagate(node, reward)
+			reward, rollout_moves = self._rollout(node.matrix, node.to_move, n)
+			self._backpropagate(path_nodes, path_moves + rollout_moves, reward)
 			iterations += 1
 
 		best_child = max(root.children, key=lambda c: c.visits) if root.children else None
@@ -229,24 +393,41 @@ class SmartPlayer(Player):
 		return best_child.move_from_parent
 
 	def _select_child(self, node: _Node) -> _Node:
-		if node.to_move == self.player_id:
-			return max(node.children, key=lambda child: child.uct(self.exploration))
-		return min(node.children, key=lambda child: child.uct(self.exploration))
+		parent_visits_log = math.log(max(1, node.visits))
 
-	def _rollout(self, matrix: List[List[int]], to_move: int, n: int) -> float:
+		def score(child: _Node) -> float:
+			if child.visits == 0:
+				return float("inf")
+
+			m = child.move_from_parent
+			q_uct = child.value_sum / child.visits
+			r_visits = node.rave_visits.get(m, 0)
+			r_q = (node.rave_value_sum[m] / r_visits) if r_visits > 0 else 0.0
+			beta = self.rave_equiv / (self.rave_equiv + child.visits)
+			mixed_q = (1.0 - beta) * q_uct + beta * r_q
+			exploration_term = self.exploration * math.sqrt(parent_visits_log / child.visits)
+			return mixed_q + exploration_term
+
+		if node.to_move == self.player_id:
+			return max(node.children, key=score)
+		return min(node.children, key=score)
+
+	def _rollout(self, matrix: List[List[int]], to_move: int, n: int) -> Tuple[float, List[Tuple[Move, int]]]:
 		sim = [row[:] for row in matrix]
 		player = to_move
+		played_moves: List[Tuple[Move, int]] = []
+		uf_p1, uf_p2, left, right, top, bottom = _build_rollout_union_finds(sim)
 
 		for _ in range(min(n * n, self.max_rollout_moves)):
-			win = _winner(sim)
+			win = _rollout_winner_dsu(uf_p1, uf_p2, left, right, top, bottom)
 			if win != 0:
 				if win == self.player_id:
-					return 1.0
-				return -1.0
+					return 1.0, played_moves
+				return -1.0, played_moves
 
 			legal = _legal_moves(sim)
 			if not legal:
-				return 0.0
+				return 0.0, played_moves
 
 			frontier = _frontier_moves(sim, legal)
 			candidates = frontier if frontier else legal
@@ -254,14 +435,32 @@ class SmartPlayer(Player):
 			# Priority 1: if current player has a winning move now, play it.
 			move = None
 			for candidate in candidates:
-				test = _play_move(sim, candidate, player)
-				if _winner(test) == player:
+				if _would_win_with_move_dsu(
+					sim,
+					candidate,
+					player,
+					uf_p1,
+					uf_p2,
+					left,
+					right,
+					top,
+					bottom,
+				):
 					move = candidate
 					break
 			if move is None and candidates is not legal:
 				for candidate in legal:
-					test = _play_move(sim, candidate, player)
-					if _winner(test) == player:
+					if _would_win_with_move_dsu(
+						sim,
+						candidate,
+						player,
+						uf_p1,
+						uf_p2,
+						left,
+						right,
+						top,
+						bottom,
+					):
 						move = candidate
 						break
 
@@ -269,14 +468,32 @@ class SmartPlayer(Player):
 			enemy = 2 if player == 1 else 1
 			if move is None:
 				for candidate in candidates:
-					test = _play_move(sim, candidate, enemy)
-					if _winner(test) == enemy:
+					if _would_win_with_move_dsu(
+						sim,
+						candidate,
+						enemy,
+						uf_p1,
+						uf_p2,
+						left,
+						right,
+						top,
+						bottom,
+					):
 						move = candidate
 						break
 			if move is None and candidates is not legal:
 				for candidate in legal:
-					test = _play_move(sim, candidate, enemy)
-					if _winner(test) == enemy:
+					if _would_win_with_move_dsu(
+						sim,
+						candidate,
+						enemy,
+						uf_p1,
+						uf_p2,
+						left,
+						right,
+						top,
+						bottom,
+					):
 						move = candidate
 						break
 
@@ -294,21 +511,43 @@ class SmartPlayer(Player):
 			if move is None:
 				move = candidates[random.randrange(len(candidates))]
 
-			r, c = move
-			sim[r][c] = player
+			_apply_move_to_rollout_dsu(
+				sim,
+				move,
+				player,
+				uf_p1,
+				uf_p2,
+				left,
+				right,
+				top,
+				bottom,
+			)
+			played_moves.append((move, player))
 			player = 2 if player == 1 else 1
 
-		win = _winner(sim)
+		win = _rollout_winner_dsu(uf_p1, uf_p2, left, right, top, bottom)
 		if win == self.player_id:
-			return 1.0
+			return 1.0, played_moves
 		if win == self.enemy_id:
-			return -1.0
-		return 0.0
+			return -1.0, played_moves
+		return 0.0, played_moves
 
-	def _backpropagate(self, node: _Node, reward: float) -> None:
-		current = node
-		while current is not None:
-			current.visits += 1
-			current.value_sum += reward
-			current = current.parent
+	def _backpropagate(
+		self,
+		path_nodes: List[_Node],
+		played_moves: List[Tuple[Move, int]],
+		reward: float,
+	) -> None:
+		for idx in range(len(path_nodes) - 1, -1, -1):
+			node = path_nodes[idx]
+			node.visits += 1
+			node.value_sum += reward
+
+			seen: Set[Move] = set()
+			for move, played_by in played_moves[idx:]:
+				if played_by != node.to_move or move in seen:
+					continue
+				seen.add(move)
+				node.rave_visits[move] = node.rave_visits.get(move, 0) + 1
+				node.rave_value_sum[move] = node.rave_value_sum.get(move, 0.0) + reward
 
