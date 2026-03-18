@@ -359,6 +359,24 @@ def _is_threatened_bridge_fill(
 					return True
 	return False
 
+def _is_bridge_forming(matrix: List[List[int]], move: Move, player_id: int) -> bool:
+	r, c = move
+	n = len(matrix)
+	n1 = list(_neighbors_even_r(r, c, n))
+	
+	for nr, nc in n1:
+		if matrix[nr][nc] == 0:
+			for nnr, nnc in _neighbors_even_r(nr, nc, n):
+				if matrix[nnr][nnc] == player_id and (nnr, nnc) != (r, c):
+					shared = 0
+					for shr, shc in _neighbors_even_r(nnr, nnc, n):
+						if (shr, shc) in n1 and matrix[shr][shc] == 0:
+							shared += 1
+					if shared >= 2:
+						return True
+	return False
+
+
 
 @dataclass
 class _Node:
@@ -589,6 +607,16 @@ class SmartPlayer(Player):
 				]
 				if bridge_moves:
 					move = bridge_moves[random.randrange(len(bridge_moves))]
+
+			# Priority 3.5: form a new bridge connection
+			if move is None:
+				forming_moves = [
+					candidate
+					for candidate in candidates
+					if _is_bridge_forming(sim, candidate, player)
+				]
+				if forming_moves:
+					move = forming_moves[random.randrange(len(forming_moves))]
 
 			# Priority 4: Last Good Reply (LGR)
 			if move is None and last_move is not None:
