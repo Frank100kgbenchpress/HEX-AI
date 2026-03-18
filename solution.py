@@ -397,6 +397,18 @@ class _Node:
 		if not self.untried_moves and _winner(self.matrix) == 0:
 			self.untried_moves = _pruned_expansion_moves(self.matrix, self.to_move)
 
+def _get_symmetric_moves(move: Move, n: int) -> List[Move]:
+	r, c = move
+	symmetries = [move]
+	
+	# Rotación de 180 grados (Simetría central cruzada en tablero de Hex)
+	rot180_r = (n - 1) - r
+	rot180_c = (n - 1) - c
+	if (rot180_r, rot180_c) != move:
+		symmetries.append((rot180_r, rot180_c))
+		
+	return symmetries
+
 class SmartPlayer(Player):
 	def __init__(self, player_id: int):
 		super().__init__(player_id)
@@ -516,7 +528,7 @@ class SmartPlayer(Player):
 			reward, rollout_moves = self._rollout(node.matrix, node.to_move, n, last_m, last_p)
 			
 			all_moves = path_moves + rollout_moves
-			self._backpropagate(path_nodes, all_moves, reward)
+			self._backpropagate(path_nodes, all_moves, reward, n)
 			
 			if reward == 1.0:
 				winner = self.player_id
@@ -728,6 +740,7 @@ class SmartPlayer(Player):
 		path_nodes: List[_Node],
 		played_moves: List[Tuple[Move, int]],
 		reward: float,
+		n: int
 	) -> None:
 		for idx in range(len(path_nodes) - 1, -1, -1):
 			node = path_nodes[idx]
@@ -738,7 +751,12 @@ class SmartPlayer(Player):
 			for move, played_by in played_moves[idx:]:
 				if played_by != node.to_move or move in seen:
 					continue
-				seen.add(move)
-				node.rave_visits[move] = node.rave_visits.get(move, 0) + 1
-				node.rave_value_sum[move] = node.rave_value_sum.get(move, 0.0) + reward
+				
+				# Aplicar simetrías del patrón RAVE
+				symmetries = _get_symmetric_moves(move, n)
+				for sym_move in symmetries:
+					if sym_move not in seen:
+						seen.add(sym_move)
+						node.rave_visits[sym_move] = node.rave_visits.get(sym_move, 0) + 1
+						node.rave_value_sum[sym_move] = node.rave_value_sum.get(sym_move, 0.0) + reward
 
