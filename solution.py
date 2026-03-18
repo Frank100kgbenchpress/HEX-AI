@@ -132,11 +132,11 @@ def _frontier_moves(matrix: List[List[int]], legal: List[Move]) -> List[Move]:
 	return frontier
 
 
+_DELTAS_EVEN_R = [(-1, -1), (-1, 0), (0, -1), (0, 1), (1, -1), (1, 0)]
+_DELTAS_ODD_R = [(-1, 0), (-1, 1), (0, -1), (0, 1), (1, 0), (1, 1)]
+
 def _neighbors_even_r(r: int, c: int, n: int):
-	if r % 2 == 0:
-		deltas = [(-1, -1), (-1, 0), (0, -1), (0, 1), (1, -1), (1, 0)]
-	else:
-		deltas = [(-1, 0), (-1, 1), (0, -1), (0, 1), (1, 0), (1, 1)]
+	deltas = _DELTAS_EVEN_R if r % 2 == 0 else _DELTAS_ODD_R
 	for dr, dc in deltas:
 		nr, nc = r + dr, c + dc
 		if 0 <= nr < n and 0 <= nc < n:
