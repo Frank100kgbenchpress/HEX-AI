@@ -80,7 +80,7 @@ def _pruned_expansion_moves(matrix: List[List[int]], player_id: int) -> List[Mov
 	# A. "Must-Play" - Si hay un puente amenazado por el oponente, es mandatorio defenderlo.
 	must_play = []
 	for move in legal:
-		if _is_threatened_bridge_fill(matrix, move, player_id, enemy_id):
+		if _threatened_bridge_count(matrix, move, player_id, enemy_id) > 0:
 			must_play.append(move)
 	if must_play:
 		return must_play
@@ -336,17 +336,18 @@ def _play_move(matrix: List[List[int]], move: Move, player_id: int) -> List[List
 	return new_matrix
 
 
-def _is_threatened_bridge_fill(
+def _threatened_bridge_count(
 	matrix: List[List[int]],
 	move: Move,
 	player_id: int,
 	enemy_id: int,
-) -> bool:
+) -> int:
 	r, c = move
 	n = len(matrix)
 	neighbors_move = list(_neighbors_even_r(r, c, n))
 	neighbors_move_set = set(neighbors_move)
 
+	count = 0
 	for er, ec in neighbors_move:
 		if matrix[er][ec] != enemy_id:
 			continue
@@ -355,15 +356,16 @@ def _is_threatened_bridge_fill(
 		for pr, pc in common:
 			if matrix[pr][pc] == player_id:
 				own_endpoints += 1
-				if own_endpoints >= 2:
-					return True
-	return False
+		if own_endpoints >= 2:
+			count += 1
+	return count
 
-def _is_bridge_forming(matrix: List[List[int]], move: Move, player_id: int) -> bool:
+def _bridge_forming_count(matrix: List[List[int]], move: Move, player_id: int) -> int:
 	r, c = move
 	n = len(matrix)
 	n1 = list(_neighbors_even_r(r, c, n))
 	
+	bridges = 0
 	for nr, nc in n1:
 		if matrix[nr][nc] == 0:
 			for nnr, nnc in _neighbors_even_r(nr, nc, n):
@@ -373,8 +375,8 @@ def _is_bridge_forming(matrix: List[List[int]], move: Move, player_id: int) -> b
 						if (shr, shc) in n1 and matrix[shr][shc] == 0:
 							shared += 1
 					if shared >= 2:
-						return True
-	return False
+						bridges += 1
+	return bridges // 2
 
 
 
@@ -400,11 +402,13 @@ class SmartPlayer(Player):
 		super().__init__(player_id)
 		self.enemy_id = 2 if player_id == 1 else 1
 		self.exploration = 1.2
-		self.rave_equiv = 300.0
+		self.rave_equiv = 600.0  # Cota más alta (priorizar UCT al principio)
 		self.max_rollout_moves = 200
-		self.time_budget_seconds = 1.2
+		self.time_budget_seconds = 4.8
 		self.max_iterations = 5000
 		self.lgr_table: Dict[Tuple[Move, int], Move] = {}
+		self.killer_moves: List[Move] = []
+		self._opening_book_cache: Dict[int, List[Move]] = {}
 
 	def _update_lgr(self, played_moves: List[Tuple[Move, int]], winner: int) -> None:
 		for i in range(1, len(played_moves)):
@@ -412,6 +416,24 @@ class SmartPlayer(Player):
 			curr_move, curr_player = played_moves[i]
 			if curr_player == winner:
 				self.lgr_table[(prev_move, prev_player)] = curr_move
+
+	def _get_opening_book(self, n: int) -> List[Move]:
+		if n in self._opening_book_cache:
+			return self._opening_book_cache[n]
+			
+		book: List[Move] = []
+		center = n // 2
+		# Centro exacto como la mejor
+		book.append((center, center))
+		
+		# Las 4 casillas más fuertes/vecinas alrededor del centro (en estrella / forma de puente directo)
+		book.append((center - 1, center))
+		book.append((center, center - 1))
+		book.append((center + 1, center))
+		book.append((center, center + 1))
+		
+		self._opening_book_cache[n] = book
+		return book
 
 	def play(self, board: HexBoard) -> tuple:
 		matrix = _copy_matrix(board)
@@ -422,6 +444,13 @@ class SmartPlayer(Player):
 			return (0, 0)
 		if len(moves) == 1:
 			return moves[0]
+
+		# Usar el libro de aperturas para turnos muy tempranos
+		if len(moves) >= n * n - 2:
+			book = self._get_opening_book(n)
+			for move in book:
+				if move in moves:
+					return move
 
 		# Tactical shortcut: play immediate winning move if available.
 		for move in moves:
@@ -434,6 +463,21 @@ class SmartPlayer(Player):
 			test = _play_move(matrix, move, self.enemy_id)
 			if _winner(test) == self.enemy_id:
 				return move
+
+		# Double Threat Detection (Fors/Ladders): If playing a move yields >= 2 winning continuations next turn,
+		# the opponent won't be able to block both. Return this immediate winning double threat.
+		if len(moves) <= 40:  # Optimization: Only run N^2 checks when there are less moves left to keep it fast
+			for move in moves:
+				test = _play_move(matrix, move, self.player_id)
+				winning_continuations = 0
+				for next_m in moves:
+					if next_m == move:
+						continue
+					test_next = _play_move(test, next_m, self.player_id)
+					if _winner(test_next) == self.player_id:
+						winning_continuations += 1
+						if winning_continuations >= 2:
+							return move
 
 		root = _Node(matrix=matrix, to_move=self.player_id)
 		start = time.perf_counter()
@@ -476,10 +520,17 @@ class SmartPlayer(Player):
 			
 			if reward == 1.0:
 				winner = self.player_id
+				self.killer_moves.extend([m for m, p in rollout_moves if p == self.player_id])
 			elif reward == -1.0:
 				winner = self.enemy_id
+				self.killer_moves.extend([m for m, p in rollout_moves if p == self.enemy_id])
 			else:
 				winner = 0
+
+			# Mantener un tamaño controlado de las Killer Moves más recientes
+			if len(self.killer_moves) > 50:
+				self.killer_moves = self.killer_moves[-50:]
+
 			if winner != 0:
 				self._update_lgr(all_moves, winner)
 
@@ -492,6 +543,8 @@ class SmartPlayer(Player):
 
 	def _select_child(self, node: _Node) -> _Node:
 		parent_visits_log = math.log(max(1, node.visits))
+		n = len(node.matrix)
+		center = (n - 1) / 2.0
 
 		def score(child: _Node) -> float:
 			if child.visits == 0:
@@ -504,7 +557,18 @@ class SmartPlayer(Player):
 			beta = self.rave_equiv / (self.rave_equiv + child.visits)
 			mixed_q = (1.0 - beta) * q_uct + beta * r_q
 			exploration_term = self.exploration * math.sqrt(parent_visits_log / child.visits)
-			return mixed_q + exploration_term
+			
+			# Prioridad 1 (Domain Knowledge): Cercanía al centro
+			r, c = m
+			dist_sq = (r - center)**2 + (c - center)**2
+			max_dist_sq = 2 * (center**2) if center > 0 else 1.0
+			prior_bonus = 0.5 * (1.0 - math.sqrt(dist_sq) / (math.sqrt(max_dist_sq) + 1e-3)) / (1 + child.visits)
+
+			# Prioridad 2 (Killer Moves): Movimientos exitosos recientes
+			k_count = self.killer_moves.count(m)
+			killer_bonus = (0.2 * k_count) / (1 + child.visits) if k_count > 0 else 0.0
+
+			return mixed_q + exploration_term + prior_bonus + killer_bonus
 
 		if node.to_move == self.player_id:
 			return max(node.children, key=score)
@@ -519,7 +583,11 @@ class SmartPlayer(Player):
 		last_move = in_tree_last_move
 		last_player = in_tree_last_player
 
-		for _ in range(min(n * n, self.max_rollout_moves)):
+		# Reducir el límite de movimientos del rollout para ahorrar tiempo 
+		# (p.ej: no simular hasta la saciedad si no es necesario)
+		rollout_limit = int((n * n) * 0.6)
+
+		for _ in range(min(rollout_limit, self.max_rollout_moves)):
 			win = _rollout_winner_dsu(uf_p1, uf_p2, left, right, top, bottom)
 			if win != 0:
 				if win == self.player_id:
@@ -598,37 +666,39 @@ class SmartPlayer(Player):
 						move = candidate
 						break
 
-			# Priority 3: fill threatened bridge.
+			# Probabilistic Policy for tactical patterns (Virtual Connections, Double threats, LGR)
 			if move is None:
-				bridge_moves = [
-					candidate
-					for candidate in candidates
-					if _is_threatened_bridge_fill(sim, candidate, player, enemy)
-				]
-				if bridge_moves:
-					move = bridge_moves[random.randrange(len(bridge_moves))]
-
-			# Priority 3.5: form a new bridge connection
-			if move is None:
-				forming_moves = [
-					candidate
-					for candidate in candidates
-					if _is_bridge_forming(sim, candidate, player)
-				]
-				if forming_moves:
-					move = forming_moves[random.randrange(len(forming_moves))]
-
-			# Priority 4: Last Good Reply (LGR)
-			if move is None and last_move is not None:
-				response = self.lgr_table.get((last_move, last_player))
-				if response is not None:
-					rr, rc = response
-					if sim[rr][rc] == 0:
-						move = response
-
-			# Priority 5: random move restricted to local frontier.
-			if move is None:
-				move = candidates[random.randrange(len(candidates))]
+				lgr_move = None
+				if last_move is not None:
+					response = self.lgr_table.get((last_move, last_player))
+					if response is not None:
+						rr, rc = response
+						if sim[rr][rc] == 0:
+							lgr_move = response
+							
+				weights = []
+				for candidate in candidates:
+					w = 1.0  # Base logic: random uniform
+					
+					# Double threats & Virtual connections (Bridges)
+					# Defending bridges (more weight if double threat / ladder situation)
+					thcb = _threatened_bridge_count(sim, candidate, player, enemy)
+					if thcb > 0:
+						w += 50.0 * thcb 
+					
+					# Forming bridges (establishing VCs)
+					bfcb = _bridge_forming_count(sim, candidate, player)
+					if bfcb > 0:
+						w += 20.0 * bfcb
+						
+					# Last Good Reply
+					if candidate == lgr_move:
+						w += 30.0
+						
+					weights.append(w)
+				
+				# Weighted random selection
+				move = random.choices(candidates, weights=weights, k=1)[0]
 
 			_apply_move_to_rollout_dsu(
 				sim,
