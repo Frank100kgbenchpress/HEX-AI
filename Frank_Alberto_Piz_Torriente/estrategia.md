@@ -1,35 +1,35 @@
 # Estrategia del Agente Hex
 
-Este agente usa **MCTS (Monte Carlo Tree Search)** con mejoras para jugar rapido y de forma tactica en tableros grandes.
+Este agente usa **MCTS (Monte Carlo Tree Search)** con mejoras heurísticas avanzadas para jugar rápido y de forma táctico-estratégica en tableros de Hex.
 
 ## Resumen de la estrategia
 
-1. **MCTS con limite de tiempo**
-   - Ejecuta iteraciones de seleccion, expansion, rollout y retropropagacion.
-   - Usa presupuesto temporal por jugada para respetar el limite de tiempo.
+1. **MCTS con Asignación de Tiempo Dinámico**
+   - Ejecuta iteraciones de selección, expansión, rollout y retropropagación.
+   - El límite de tiempo por cada jugada no es rígido, asigna un menor tiempo general de cálculo en aperturas y finales (donde hay poca ramificación o ya es resuelto), y alcanza su clímax de presupuesto durante el medio-juego del tablero donde la disputa requerirá ramificarse más.
 
-2. **RAVE (AMAF) en seleccion**
-   - La seleccion de hijos mezcla el valor UCT clasico con estadisticas RAVE.
-   - Al inicio de la busqueda confia mas en RAVE; con mas visitas confia mas en UCT.
+2. **Libro de Aperturas y Atajos Tácticos (Mate en 1 y Mate en 2)**
+   - Durante las primeras 2 jugadas del tablero extrae posiciones del centro y puentes inmediatos de un libro cacheado para no perder tiempo en el árbol de búsqueda en un tablero vacío.
+   - En el juego se buscan jugadas ganadoras inmediatas, bloqueos de rivales al instante y, opcionalmente al reducir opciones, _amenazas dobles o tenedores_ ("foks") que generen dos o más amenazas imparables al oponente.
 
-3. **Rollout guiado por prioridades tacticas**
-   - Prioridad 1: jugar victoria inmediata.
-   - Prioridad 2: bloquear victoria inmediata del rival.
-   - Prioridad 3: rellenar puentes (bridge) amenazados.
-   - Prioridad 4: elegir aleatoriamente en la frontera (vecinos de fichas ya colocadas).
+3. **RAVE (AMAF) Simétrico en Selección**
+   - La selección de hijos mezcla el valor UCT clásico con estadísticas RAVE, habiendo elevado el parámetro de RAVE para afianzar la exploración inicial.
+   - Se aprovecha la simetría de rotación de 180º del Hex para registrar a la vez retropropagaciones RAVE equivalentes, lo que multiplica el conocimiento y reduce iteraciones innecesarias ("shadow learning").
 
-4. **Chequeo de victoria optimizado con DSU (Union-Find)**
-   - Durante rollout no usa BFS/DFS en cada paso.
-   - Mantiene componentes conectados con nodos virtuales:
-     - Jugador 1: `LEFT` y `RIGHT`
-     - Jugador 2: `TOP` y `BOTTOM`
-   - Hay victoria cuando los nodos virtuales del jugador quedan conectados.
+4. **Rollout Probabilístico Guiado**
+   En lugar de la caída rígida en cascada, ahora se aplican selecciones aleatorias usando pesos ponderados basados en las siguientes evaluaciones:
+   - **Victorias / Bloqueos directos:** Continúa teniendo la máxima jerarquía.
+   - **Amenazas o Conexiones Múltiples:** Cuenta y evalúa la capacidad de una celda de solucionar múltiples "puentes" rotos a la vez o formar nuevas conexiones virtuales en diamante ("virtual connections"). Aquellas que formen más sumarán más peso.
+   - **LGR (Last Good Reply):** Si un movimiento reciente fue una respuesta exitosa ante una casilla tirada por el oponente en el recorrido de la simulación ganadora anterior, tratará de contestar de nuevo agresivamente con ese mismo contraataque.
+   - Para no extender el cómputo, los rollouts detienen su simulación rebasado un estimado del 60% de las casillas en un límite artificial conservando la precisión.
 
-5. **Poda en expansion (virtual connections)**
-   - No expande todos los movimientos legales.
-   - Solo considera movimientos vacios a distancia 1 o 2 de fichas existentes.
-   - Esto reduce el branching factor y concentra la busqueda en la zona relevante.
+5. **Optimización con Algoritmos de Búsqueda y Poda de Nodos Relevantes**
+   - En *Expansión* se eliminan "Cells Muertas", donde se podan posiciones irrelevantes que no colindan con huecos libres en etapas de gran amplitud del ramal ("Captured Spaces").
+   - Las reglas de *amenazas inminentes de un puente (must-play)* actúan como filtro excluyente. Si el oponente busca romper un diamante en "mid-game", el motor no explorará en otra zona distante.
 
-## Objetivo practico
+6. **Killer Moves & Conocimiento del Dominio**
+   - Al buscar a los hijos con mejor score en memoria del árbol, se le aplicará a nuevos nodos un multiplicador decreciente (prior knowledge bias) que beneficia a los puntos centrales del tablero en las etapas tempranas de vida del nodo.
+   - También son sesgados incrementalmente aquellos nodos cuyas casillas pertenezcan inherentemente a la lista global en caché reciente de victorias inmediatas (*Killer Moves* generados en simulados previos).
 
-Combinar **fuerza tactica inmediata** con **eficiencia computacional** para rendir bien dentro del limite de tiempo por jugada.
+7. **Chequeo de victoria de DSU (Union-Find) veloz**
+   - Durante las rutinas no se emplea el BFS en la evaluación profunda. Mantiene una matriz virtual disjunta rápida que une nodos falsos de bordes.
