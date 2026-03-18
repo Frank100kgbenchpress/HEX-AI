@@ -60,7 +60,8 @@ def _legal_moves(matrix: List[List[int]]) -> List[Move]:
 	return moves
 
 
-def _pruned_expansion_moves(matrix: List[List[int]]) -> List[Move]:
+def _pruned_expansion_moves(matrix: List[List[int]], player_id: int) -> List[Move]:
+	enemy_id = 2 if player_id == 1 else 1
 	n = len(matrix)
 	occupied: List[Move] = []
 	legal: List[Move] = []
@@ -76,6 +77,15 @@ def _pruned_expansion_moves(matrix: List[List[int]]) -> List[Move]:
 	if not occupied:
 		return legal
 
+	# A. "Must-Play" - Si hay un puente amenazado por el oponente, es mandatorio defenderlo.
+	must_play = []
+	for move in legal:
+		if _is_threatened_bridge_fill(matrix, move, player_id, enemy_id):
+			must_play.append(move)
+	if must_play:
+		return must_play
+
+	# C. Distancia a la Línea de Frente
 	candidates: Set[Move] = set()
 	for r, c in occupied:
 		for n1r, n1c in _neighbors_even_r(r, c, n):
@@ -88,8 +98,25 @@ def _pruned_expansion_moves(matrix: List[List[int]]) -> List[Move]:
 	if not candidates:
 		return legal
 
-	# Keep row-major order for reproducible behavior.
-	return [move for move in legal if move in candidates]
+	pruned = []
+	for move in legal:
+		if move not in candidates:
+			continue
+		
+		# B. Celdas capturadas / sin vecinos vacíos
+		r, c = move
+		empty_neighbors = 0
+		for nr, nc in _neighbors_even_r(r, c, n):
+			if matrix[nr][nc] == 0:
+				empty_neighbors += 1
+		
+		if empty_neighbors == 0 and len(legal) > 1:
+			continue
+			
+		pruned.append(move)
+
+	# Mantener orden para consistencia predictiva
+	return pruned if pruned else legal
 
 
 def _frontier_moves(matrix: List[List[int]], legal: List[Move]) -> List[Move]:
@@ -348,7 +375,7 @@ class _Node:
 
 	def __post_init__(self) -> None:
 		if not self.untried_moves and _winner(self.matrix) == 0:
-			self.untried_moves = _pruned_expansion_moves(self.matrix)
+			self.untried_moves = _pruned_expansion_moves(self.matrix, self.to_move)
 
 class SmartPlayer(Player):
 	def __init__(self, player_id: int):
@@ -359,6 +386,14 @@ class SmartPlayer(Player):
 		self.max_rollout_moves = 200
 		self.time_budget_seconds = 1.2
 		self.max_iterations = 5000
+		self.lgr_table: Dict[Tuple[Move, int], Move] = {}
+
+	def _update_lgr(self, played_moves: List[Tuple[Move, int]], winner: int) -> None:
+		for i in range(1, len(played_moves)):
+			prev_move, prev_player = played_moves[i-1]
+			curr_move, curr_player = played_moves[i]
+			if curr_player == winner:
+				self.lgr_table[(prev_move, prev_player)] = curr_move
 
 	def play(self, board: HexBoard) -> tuple:
 		matrix = _copy_matrix(board)
@@ -415,8 +450,21 @@ class SmartPlayer(Player):
 				node = child
 				path_nodes.append(node)
 
-			reward, rollout_moves = self._rollout(node.matrix, node.to_move, n)
-			self._backpropagate(path_nodes, path_moves + rollout_moves, reward)
+			last_m, last_p = path_moves[-1] if path_moves else (None, 0)
+			reward, rollout_moves = self._rollout(node.matrix, node.to_move, n, last_m, last_p)
+			
+			all_moves = path_moves + rollout_moves
+			self._backpropagate(path_nodes, all_moves, reward)
+			
+			if reward == 1.0:
+				winner = self.player_id
+			elif reward == -1.0:
+				winner = self.enemy_id
+			else:
+				winner = 0
+			if winner != 0:
+				self._update_lgr(all_moves, winner)
+
 			iterations += 1
 
 		best_child = max(root.children, key=lambda c: c.visits) if root.children else None
@@ -444,11 +492,14 @@ class SmartPlayer(Player):
 			return max(node.children, key=score)
 		return min(node.children, key=score)
 
-	def _rollout(self, matrix: List[List[int]], to_move: int, n: int) -> Tuple[float, List[Tuple[Move, int]]]:
+	def _rollout(self, matrix: List[List[int]], to_move: int, n: int, in_tree_last_move: Optional[Move] = None, in_tree_last_player: int = 0) -> Tuple[float, List[Tuple[Move, int]]]:
 		sim = [row[:] for row in matrix]
 		player = to_move
 		played_moves: List[Tuple[Move, int]] = []
 		uf_p1, uf_p2, left, right, top, bottom = _build_rollout_union_finds(sim)
+		
+		last_move = in_tree_last_move
+		last_player = in_tree_last_player
 
 		for _ in range(min(n * n, self.max_rollout_moves)):
 			win = _rollout_winner_dsu(uf_p1, uf_p2, left, right, top, bottom)
@@ -539,7 +590,15 @@ class SmartPlayer(Player):
 				if bridge_moves:
 					move = bridge_moves[random.randrange(len(bridge_moves))]
 
-			# Priority 4: random move restricted to local frontier.
+			# Priority 4: Last Good Reply (LGR)
+			if move is None and last_move is not None:
+				response = self.lgr_table.get((last_move, last_player))
+				if response is not None:
+					rr, rc = response
+					if sim[rr][rc] == 0:
+						move = response
+
+			# Priority 5: random move restricted to local frontier.
 			if move is None:
 				move = candidates[random.randrange(len(candidates))]
 
@@ -555,6 +614,8 @@ class SmartPlayer(Player):
 				bottom,
 			)
 			played_moves.append((move, player))
+			last_move = move
+			last_player = player
 			player = 2 if player == 1 else 1
 
 		win = _rollout_winner_dsu(uf_p1, uf_p2, left, right, top, bottom)
