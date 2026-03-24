@@ -524,7 +524,7 @@ class SmartPlayer(Player):
 				path_nodes.append(node)
 
 			last_m, last_p = path_moves[-1] if path_moves else (None, 0)
-			reward, rollout_moves = self._rollout(node.matrix, node.to_move, n, last_m, last_p)
+			reward, rollout_moves = self._rollout(node.matrix, node.to_move, n, last_m, last_p, start)
 			
 			all_moves = path_moves + rollout_moves
 			self._backpropagate(path_nodes, all_moves, reward, n)
@@ -585,7 +585,7 @@ class SmartPlayer(Player):
 			return max(node.children, key=score)
 		return min(node.children, key=score)
 
-	def _rollout(self, matrix: List[List[int]], to_move: int, n: int, in_tree_last_move: Optional[Move] = None, in_tree_last_player: int = 0) -> Tuple[float, List[Tuple[Move, int]]]:
+	def _rollout(self, matrix: List[List[int]], to_move: int, n: int, in_tree_last_move: Optional[Move] = None, in_tree_last_player: int = 0, start_time: float = 0.0) -> Tuple[float, List[Tuple[Move, int]]]:
 		sim = [row[:] for row in matrix]
 		player = to_move
 		played_moves: List[Tuple[Move, int]] = []
@@ -599,6 +599,9 @@ class SmartPlayer(Player):
 		rollout_limit = int((n * n) * 0.6)
 
 		for _ in range(min(rollout_limit, self.max_rollout_moves)):
+			if time.perf_counter() - start_time > self.time_budget_seconds - 0.2:
+				return 0.0, played_moves
+
 			win = _rollout_winner_dsu(uf_p1, uf_p2, left, right, top, bottom)
 			if win != 0:
 				# Penalizar caminos largos para que remate rápido en vez de trolear/jugar con la comida
@@ -691,20 +694,35 @@ class SmartPlayer(Player):
 							
 				candidates_eval = []
 				has_threat = False
+				is_heavy_board = n >= 13 and len(legal) > 60
+				center = n / 2.0
+				
 				for candidate in candidates:
 					thcb = _threatened_bridge_count(sim, candidate, player, enemy)
-					bfcb = _bridge_forming_count(sim, candidate, player)
-					enemy_bfcb = _bridge_forming_count(sim, candidate, enemy)
 					own_neighbors = sum(1 for nr, nc in _neighbors_even_r(candidate[0], candidate[1], n) if sim[nr][nc] == player)
+					
+					r, c = candidate
+					dist_sq = (r - center)**2 + (c - center)**2
+					
+					if is_heavy_board:
+						bfcb = 0
+						enemy_bfcb = 0
+					else:
+						bfcb = _bridge_forming_count(sim, candidate, player)
+						enemy_bfcb = _bridge_forming_count(sim, candidate, enemy)
 					
 					if thcb > 0:
 						has_threat = True
 						
-					candidates_eval.append((candidate, thcb, bfcb, enemy_bfcb, own_neighbors))
+					candidates_eval.append((candidate, thcb, bfcb, enemy_bfcb, own_neighbors, dist_sq))
 					
 				weights = []
-				for candidate, thcb, bfcb, enemy_bfcb, own_neighbors in candidates_eval:
+				for candidate, thcb, bfcb, enemy_bfcb, own_neighbors, dist_sq in candidates_eval:
 					w = 1.0  # Base logic: random uniform
+					
+					if is_heavy_board:
+						# En tableros grandes penalizamos un poco jugar lejos del centro
+						w += max(0, 10.0 - math.sqrt(dist_sq))
 					
 					# 1. Defending bridges from enemy (Prioridad Absoluta)
 					if thcb > 0:
