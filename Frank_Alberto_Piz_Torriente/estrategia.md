@@ -1,38 +1,58 @@
-# Estrategia del Agente Hex
+# Informe de Estrategia: Agente de Inteligencia Artificial para Hex
 
-Este agente usa **MCTS (Monte Carlo Tree Search)** con mejoras heurísticas avanzadas para jugar rápido y de forma táctico-estratégica en tableros de Hex.
+Este documento detalla la arquitectura algorítmica y las decisiones de diseño empleadas en el desarrollo del agente para el juego de Hex. El agente implementa un algoritmo de **Monte Carlo Tree Search (MCTS)** profundamente optimizado con heurísticas específicas del dominio, meta-estrategias de simulación y un estricto control de tiempo para maximizar la efectividad en un factor de ramificación masivo.
 
-## Resumen de la estrategia
+---
 
-1. **MCTS con Asignación de Tiempo Estricta y Dinámica**
-   - Ejecuta iteraciones de selección, expansión, rollout y retropropagación respetando implacablemente el cronómetro (4.8s/5.0s) desde el milisegundo en que inicia su turno preventivo.
-   - Alcanza su clímax de presupuesto de tiempo durante el medio-juego del tablero donde la disputa requerirá ramificarse más, mientras que las aperturas se aligeran.
+## 1. Arquitectura Base: MCTS Orientado al Rendimiento
 
-2. **Libro de Aperturas y Atajos Tácticos DSU (Mate en 1 y Mate en 2)**
-   - Durante las primeras jugadas del tablero extrae posiciones del centro y puentes inmediatos de un libro cacheado para no perder tiempo en el árbol de búsqueda en un tablero casi vacío.
-   - En el juego se buscan jugadas ganadoras inmediatas y bloqueos de rivales al instante operando de modo ultra-rápido empleando *Disjoint Set Union (DSU)* directamente desde la raíz antes de iterar MCTS, evitando que victorias garantizadas consuman tiempo ciego del árbol.
-   - Si restan pocas opciones, detecta *amenazas dobles o tenedores* ("forks") calculados a gran velocidad con copias ligeras del estado y validados con DSU, asegurando victorias imparables en turnos dobles.
+El núcleo del agente se basa en MCTS, estructurado en las cuatro fases clásicas (Selección, Expansión, Simulación y Retropropagación). Sin embargo, dada la magnitud del espacio de estados en Hex (particularmente en tableros de 19x19), el algoritmo estándar se ha expandido masivamente:
 
-3. **RAVE (AMAF) Simétrico en Selección**
-   - La selección de hijos mezcla el valor UCT clásico con estadísticas RAVE, habiendo elevado el parámetro de RAVE para afianzar la exploración inicial.
-   - Se aprovecha la simetría de rotación cruzada (180º) del modelo topológico de Hex para registrar un "shadow learning", reduciendo iteraciones.
+* **Control de Presupuesto de Tiempo de Alta Precisión:** El algoritmo principal de iteración evalúa constantemente su tiempo de ejecución, cerrando la búsqueda y seleccionando la mejor rama cuando el reloj interno del sistema alcanza los 4.8 segundos (`time_budget_seconds`).
+* **Freno de Emergencia Intra-Simulación:** A diferencia de las implementaciones clásicas, el control temporal también se inyecta *dentro* de las capas de la fase de Rollout. Si una simulación se enreda en un tablero masivo, el hilo finaliza prematuramente, evitando un veredicto de "Tiempo Agotado" por parte del sistema central o del juez (previniendo caídas totales del ciclo lógico).
 
-4. **Rollout Probabilístico Dinámico y Adaptativo**
-   En lugar de la caída rígida en cascada, ahora se aplican selecciones aleatorias guiadas por distribuciones de pesos ("weights") que se adaptan al estado de amenaza de la mesa (`has_threat`):
-   - **Evaluación de Amenaza Inminente:** Mide en tiempo real de rollout si el oponente va a ganar conectando un puente. Si el sistema arroja peligro (`has_threat = True`), los pesos se vuelcan masivamente a jugadas defensivas y bloqueos (`+200.0`). Si se asume seguro frente a su oponente, se vuelve puramente agresivo ponderando conectar diamantes con sus celdas vecinas (`+80.0`), sin parar a bloquear sin un fin.
-   - **Victorias / Bloqueos directos:** Continúa teniendo la máxima jerarquía.
-   - **LGR (Last Good Reply):** Si un movimiento reciente fue una respuesta exitosa ante una casilla tirada por el oponente, tratará de contestar de nuevo agresivamente con ese mismo contraataque.
+---
 
-5. **Optimización con Algoritmos de Búsqueda y Poda de Nodos Relevantes**
-   - En *Expansión* se eliminan "Cells Muertas" (posiciones aisladas inofensivas) priorizando la contigüidad.
-   - Filtros de respuesta obligatoria: Si hay ataques fuertes al interior de un sub-estado ramificado, los atajos de *Must-play* dirigen a MCTS en el objetivo.
+## 2. Tecnologías de Aceleración Estructural y Topológica
 
-6. **Killer Moves & Conocimiento del Dominio**
-   - Al buscar a los hijos con mejor score en memoria del árbol, se le aplica a nuevos nodos un multiplicador decreciente (prior knowledge bias) que beneficia a los puntos centrales del tablero en las etapas tempranas.
-   - También son sesgados incrementalmente aquellos nodos cuyas casillas pertenezcan a la caché reciente de victorias inmediatas (*Killer Moves* generados en simulados previos).
+Para realizar verificaciones de estado y victoria sin sufrir los retrasos sistémicos de estructuras iterativas pesadas (como DFS/BFS), se implementan atajos de cómputo:
 
-7. **Chequeo de Victoria Rápida y Topología Espacial**
-   - Las comprobaciones topológicas aplican deltas adyacentes de la geometría diagonal del hexágono matemático `[(-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0)]` permitiendo una integración perfecta con nuestra matriz disjunta veloz (*DSU / Union-Find*). Esto prescindió de las lentas exploraciones por DFS y garantizó O(1) real en revisiones de subcadenas acrónimas.
+* **Disjoint Set Union (DSU / Union-Find):** La validación de conectividad de los nodos a los bordes del tablero no se calcula por búsqueda de grafos recursiva, sino usando un DSU. Cada jugador tiene un bosque de conectividades donde los extremos virtuales (arriba-abajo o izquierda-derecha) actúan como centinelas. Si una jugada unifica las raíces de los bordes, equivale a victoria segura verificable en **O(α(N))** (prácticamente tiempo constante).
+* **Amenazas Dobles / Tenedores ("Forks") en Raíz:** Cuando quedan escasas opciones, el agente explora iteraciones de 2 profundidades en atajo para buscar movimientos que revelen dos o más frentes ganadores simultáneos de mate-en-1, haciendo ineludible la victoria matemática y obviando el coste del árbol MCTS.
 
-8. **Penalización por Longitud de Partida (Length Penalty)**
-   - Se imparte un decaimiento progresivo a la recompensa final obtenida sobre la trayectoria simulada (`recompensa = 1.0 - penalidad`). Obliga a la IA a no "jugar con su comida"; priorizando siempre las finalizaciones de partida más cortas imaginables en lugar de hacer bloqueos o movimientos inútiles en un sub-tablero que ya ha vencido estratégicamente.
+---
+
+## 3. Funciones Heurísticas Avanzadas (MCTS-Mejorado)
+
+Con el fin de sesgar positivamente la fase de Selección y Expansión, reduciendo exploraciones caóticas y priorizando calidad, el motor implementa las siguientes mejoras estructurales:
+
+### A. RAVE (Rapid Action Value Estimation) y Simetría Hexagonal
+Utiliza el principio de *All-Moves-As-First (AMAF)*. Durante un rollout, un buen movimiento tardío se valora como un candidato que habría sido bueno haber jugado desde la raíz. El agente combina **UCT** (Upper Confidence Bound) con los valores RAVE. Adicionalmente, aprovecha las propiedades geométricas del tablero Hex inyectando aprendizajes subyacentes en su cuadrante simétricamente opuesto (rotación topológica 180º).
+
+### B. Memoria Táctica Transitoria: Killer Moves y LGR
+* **Last Good Reply (LGR):** Si en un rollout un contraataque logró el porcentaje de victoria más alto después del movimiento X por el oponente, ese combo (Ataque-Respuesta) se guarda en una tabla y se premia de nuevo probabilísticamente ante dicha situación, propiciando bloqueos de respuesta comprobada por el sistema.
+* **Killer Moves (Prioridad 2):** Movimientos que han ganado simulaciones recientes son encolados globalmente como prioridades sobre las visitas iniciales de los nodos hijos en el árbol formal de expansión.
+
+### C. Sesgos Iniciales de Dominio (Domain Knowledge - Prioridad 1)
+En el nodo recién expandido, los candidatos más cercanos al círculo central reciben un bono estadístico temporal que decae fuertemente con cada visita. Se garantiza el peso gravitacional inicial de la captura del centro sobre exploraciones inútiles en rincones aislados. Además, se emplea un **Libro de Aperturas Cacheado** de centro y puentes básicos en el inicio absoluto para evitar pensar "en blanco".
+
+---
+
+## 4. Rollouts Híbridos y Probabilidades Condicionadas (Dynamic Playouts)
+
+Dado que las iteraciones Monte-Carlo en tableros grandes (como 19x19) resultaban prohibitivas por cálculo, consumiendo hasta 7 segundos por iteración si contenían evaluaciones anidadas predictivas, se introdujo un algoritmo de simulación heurístico variable:
+
+#### Modo Ligero (Early-game masivo - Ej. Tableros $\ge 13x13$):
+Cuando el tablero es muy extenso (Turnos tempranos masivos), el agente aborta temporalmente la exhaustividad matemática. Las fichas simulan movimientos dictados puramente por un bono geométrico y penalizando drásticamente la distancia euclidiana (*$10.0 - \sqrt{dist^2}$*). El MCTS simula a máxima velocidad engordando el valor estadístico del nodo raíz.
+
+#### Modo Pesado Táctico (Late-game / Tableros compactos - Ej. $11x11$):
+Una vez el volumen del tablero disminiye (o desde el inicio de un tablero pequeño), los rollouts mutan hacia un árbol de selección ponderada (`weighted random choices`) de naturaleza táctico-predictiva:
+* **Vector de Peligro Activo (`has_threat`):** El bot reacciona defensivamente priorizando bloqueos de alto calibre (multiplicados astronómicamente ej: `+ 200 * threat`) si un puente de victoria es encendido por el adversario.
+* **Agresividad Condicionada:** Si la evaluación de amenaza muestra inactividad, los pesos se concentran asimétricamente en su estrategia de formación propia (`_bridge_forming_count`), construyendo ramales hacia los extremos de manera violenta (`+ 80 de peso relativo`).
+* **Poda "Must-Play":** A lo largo del árbol principal (fuera del rollout) los nodos sin trascendencia directa son descartados o mitigados si uno o dos movimientos se determinan como requerimientos obligatorios de supervivencia.
+
+---
+
+## 5. Criterios de Remate Eficiente (Length Penalties)
+
+Cada ruta simulada retropropaga un mitigador final que disminuye la recompensa matemática de partida `(recompensa = 1.0 - penalidad)` escalando progresivamente según el conteo y volumen métrico de la distancia. En resumen, esto instruye orgánicamente al algoritmo a consumar la victoria de la forma más rápida, mortal y directa concebida, en lugar de dilatar simulaciones con movimientos irrelevantes o aleatorios en un tablero ya mecánicamente subyugado.
