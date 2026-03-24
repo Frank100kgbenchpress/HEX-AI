@@ -132,12 +132,10 @@ def _frontier_moves(matrix: List[List[int]], legal: List[Move]) -> List[Move]:
 	return frontier
 
 
-_DELTAS_EVEN_R = [(-1, -1), (-1, 0), (0, -1), (0, 1), (1, -1), (1, 0)]
-_DELTAS_ODD_R = [(-1, 0), (-1, 1), (0, -1), (0, 1), (1, 0), (1, 1)]
+_DELTAS = [(-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0)]
 
 def _neighbors_even_r(r: int, c: int, n: int):
-	deltas = _DELTAS_EVEN_R if r % 2 == 0 else _DELTAS_ODD_R
-	for dr, dc in deltas:
+	for dr, dc in _DELTAS:
 		nr, nc = r + dr, c + dc
 		if 0 <= nr < n and 0 <= nc < n:
 			yield nr, nc
@@ -448,6 +446,7 @@ class SmartPlayer(Player):
 		return book
 
 	def play(self, board: HexBoard) -> tuple:
+		start = time.perf_counter()
 		matrix = _copy_matrix(board)
 		n = _board_size(board)
 		moves = _legal_moves(matrix)
@@ -464,16 +463,17 @@ class SmartPlayer(Player):
 				if move in moves:
 					return move
 
+		# Evaluacion tactica SUPER rapida usando el DSU
+		uf_p1, uf_p2, left, right, top, bottom = _build_rollout_union_finds(matrix)
+
 		# Tactical shortcut: play immediate winning move if available.
 		for move in moves:
-			test = _play_move(matrix, move, self.player_id)
-			if _winner(test) == self.player_id:
+			if _would_win_with_move_dsu(matrix, move, self.player_id, uf_p1, uf_p2, left, right, top, bottom):
 				return move
 
 		# Tactical defense: block opponent immediate win if possible.
 		for move in moves:
-			test = _play_move(matrix, move, self.enemy_id)
-			if _winner(test) == self.enemy_id:
+			if _would_win_with_move_dsu(matrix, move, self.enemy_id, uf_p1, uf_p2, left, right, top, bottom):
 				return move
 
 		# Double Threat Detection (Fors/Ladders): If playing a move yields >= 2 winning continuations next turn,
@@ -481,18 +481,17 @@ class SmartPlayer(Player):
 		if len(moves) <= 40:  # Optimization: Only run N^2 checks when there are less moves left to keep it fast
 			for move in moves:
 				test = _play_move(matrix, move, self.player_id)
+				uf1, uf2, l, r, t, b = _build_rollout_union_finds(test)
 				winning_continuations = 0
 				for next_m in moves:
 					if next_m == move:
 						continue
-					test_next = _play_move(test, next_m, self.player_id)
-					if _winner(test_next) == self.player_id:
+					if _would_win_with_move_dsu(test, next_m, self.player_id, uf1, uf2, l, r, t, b):
 						winning_continuations += 1
 						if winning_continuations >= 2:
 							return move
 
 		root = _Node(matrix=matrix, to_move=self.player_id)
-		start = time.perf_counter()
 		iterations = 0
 
 		while iterations < self.max_iterations:
@@ -530,10 +529,10 @@ class SmartPlayer(Player):
 			all_moves = path_moves + rollout_moves
 			self._backpropagate(path_nodes, all_moves, reward, n)
 			
-			if reward == 1.0:
+			if reward > 0: # antes decía reward == 1.0, ahora es > 0 si gana
 				winner = self.player_id
 				self.killer_moves.extend([m for m, p in rollout_moves if p == self.player_id])
-			elif reward == -1.0:
+			elif reward < 0: # si pierde
 				winner = self.enemy_id
 				self.killer_moves.extend([m for m, p in rollout_moves if p == self.enemy_id])
 			else:
@@ -602,9 +601,11 @@ class SmartPlayer(Player):
 		for _ in range(min(rollout_limit, self.max_rollout_moves)):
 			win = _rollout_winner_dsu(uf_p1, uf_p2, left, right, top, bottom)
 			if win != 0:
+				# Penalizar caminos largos para que remate rápido en vez de trolear/jugar con la comida
+				len_penalty = len(played_moves) * 0.005
 				if win == self.player_id:
-					return 1.0, played_moves
-				return -1.0, played_moves
+					return max(0.5, 1.0 - len_penalty), played_moves
+				return min(-0.5, -1.0 + len_penalty), played_moves
 
 			legal = _legal_moves(sim)
 			if not legal:
@@ -688,22 +689,46 @@ class SmartPlayer(Player):
 						if sim[rr][rc] == 0:
 							lgr_move = response
 							
-				weights = []
+				candidates_eval = []
+				has_threat = False
 				for candidate in candidates:
+					thcb = _threatened_bridge_count(sim, candidate, player, enemy)
+					bfcb = _bridge_forming_count(sim, candidate, player)
+					enemy_bfcb = _bridge_forming_count(sim, candidate, enemy)
+					own_neighbors = sum(1 for nr, nc in _neighbors_even_r(candidate[0], candidate[1], n) if sim[nr][nc] == player)
+					
+					if thcb > 0:
+						has_threat = True
+						
+					candidates_eval.append((candidate, thcb, bfcb, enemy_bfcb, own_neighbors))
+					
+				weights = []
+				for candidate, thcb, bfcb, enemy_bfcb, own_neighbors in candidates_eval:
 					w = 1.0  # Base logic: random uniform
 					
-					# Double threats & Virtual connections (Bridges)
-					# Defending bridges (more weight if double threat / ladder situation)
-					thcb = _threatened_bridge_count(sim, candidate, player, enemy)
+					# 1. Defending bridges from enemy (Prioridad Absoluta)
 					if thcb > 0:
-						w += 50.0 * thcb 
+						w += 200.0 * thcb 
 					
-					# Forming bridges (establishing VCs)
-					bfcb = _bridge_forming_count(sim, candidate, player)
+					# 2. Forma de puentes propios (Expansión Segura / Ataque)
 					if bfcb > 0:
-						w += 20.0 * bfcb
+						if has_threat:
+							w += 10.0 * bfcb  # Si hay amenazas, bajamos el ritmo de ataque para priorizar defender
+						else:
+							w += 80.0 * bfcb  # Si el rival no amenaza (está bloqueado), atacamos con todo
+
+					# 3. Defensa Activa (Bloquear puentes o avances del oponente)
+					if enemy_bfcb > 0:
+						w += 15.0 * enemy_bfcb
 						
-					# Last Good Reply
+					# 4. Conectar cadenas directamente (Acelerar la victoria)
+					if own_neighbors > 0:
+						if has_threat:
+							w += 2.0 * own_neighbors
+						else:
+							w += 20.0 * own_neighbors
+
+					# Last Good Reply (LGR)
 					if candidate == lgr_move:
 						w += 30.0
 						
@@ -729,10 +754,11 @@ class SmartPlayer(Player):
 			player = 2 if player == 1 else 1
 
 		win = _rollout_winner_dsu(uf_p1, uf_p2, left, right, top, bottom)
+		len_penalty = len(played_moves) * 0.005
 		if win == self.player_id:
-			return 1.0, played_moves
+			return max(0.5, 1.0 - len_penalty), played_moves
 		if win == self.enemy_id:
-			return -1.0, played_moves
+			return min(-0.5, -1.0 + len_penalty), played_moves
 		return 0.0, played_moves
 
 	def _backpropagate(
